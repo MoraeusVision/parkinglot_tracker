@@ -10,9 +10,10 @@ import argparse
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-VIDEO_PATH = "example_media/parking_4.mp4"
+VIDEO_PATH = "example_media/parking_2.mp4"
 OUTPUT_VIDEO_PATH = "output/saved_video.mp4"
-PREDICT_THRESHOLD = 0.3
+MODEL_PATH = "models/VisDrone_model.pth"
+PREDICT_THRESHOLD = 0.1
 
 class DetectionApp:
     def __init__(self, video_source: str, show: bool, save: bool, output_path: str, track: bool):
@@ -24,7 +25,7 @@ class DetectionApp:
         self.video_source = parse_video_source(video_source)
 
         # Model
-        self.model = RFDETRNano(device=get_device())
+        self.model = RFDETRNano(pretrain_weights=MODEL_PATH, device=get_device())
         self.model.optimize_for_inference()
 
         # Supervision tools
