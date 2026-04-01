@@ -12,8 +12,82 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 
 VIDEO_PATH = "example_media/parking_2.mp4"
 OUTPUT_VIDEO_PATH = "output/saved_video.mp4"
-MODEL_PATH = "models/VisDrone_model.pth"
+MODEL_PATH = "models/checkpoint_best_regular.pth"
 PREDICT_THRESHOLD = 0.1
+
+
+class PredictionFrameRenderer:
+    def __init__(self, track: bool):
+        self.track = track
+        self.label_annotator = sv.LabelAnnotator()
+        self.box_annotator = sv.BoxAnnotator()
+
+    def get_labels(self, prediction):
+        if self.track and prediction.tracker_id is not None:
+            return [
+                f"Car {conf:.2f} ID:{int(track_id)}"
+                for track_id, conf in zip(
+                    prediction.tracker_id,
+                    prediction.confidence
+                )
+            ]
+
+        return [f"Car {conf:.2f}" for conf in prediction.confidence]
+
+    def render(self, prediction, video_frame):
+        labels = self.get_labels(prediction)
+        annotated_image = video_frame.image.copy()
+
+        annotated_image = self.box_annotator.annotate(
+            scene=annotated_image,
+            detections=prediction
+        )
+
+        annotated_image = self.label_annotator.annotate(
+            annotated_image,
+            detections=prediction,
+            labels=labels
+        )
+
+        return annotated_image
+
+
+class FrameOutputManager:
+    def __init__(self, show: bool, save: bool):
+        self.show = show
+        self.save = save
+        self.paused = False
+        self.paused_frame = None
+        self.sink = None
+
+    def set_sink(self, sink):
+        self.sink = sink
+
+    def emit(self, frame, pipeline):
+        if self.show:
+            self.visualize(frame, pipeline)
+
+        if self.save and self.sink is not None and frame is not None:
+            self.sink.write_frame(frame)
+
+    def visualize(self, frame, pipeline):
+        # Pause only affects what is displayed; inference and saving continue.
+        display_frame = self.paused_frame if self.paused and self.paused_frame is not None else frame
+        cv2.imshow("Predictions", display_frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q"):
+            pipeline.terminate()
+            return
+
+        if key == ord(" "):
+            self.paused = not self.paused
+            if self.paused:
+                self.paused_frame = frame.copy()
+            else:
+                self.paused_frame = None
+            logging.info("Paused" if self.paused else "Resumed")
 
 class DetectionApp:
     def __init__(self, video_source: str, show: bool, save: bool, output_path: str, track: bool):
@@ -30,16 +104,13 @@ class DetectionApp:
 
         # Supervision tools
         self.tracker = sv.ByteTrack()
-        self.label_annotator = sv.LabelAnnotator()
-        self.box_annotator = sv.BoxAnnotator()
+        self.renderer = PredictionFrameRenderer(track=self.track)
+        self.output_manager = FrameOutputManager(show=self.show, save=self.save)
 
         # Video info - used for saving
         if self.save:
             self.video_info = sv.VideoInfo.from_video_path(self.video_source)
         
-        # State
-        self.paused = False
-
         # Pipeline
         self.pipeline = InferencePipeline.init_with_custom_logic(
             video_reference=self.video_source,
@@ -48,8 +119,8 @@ class DetectionApp:
         )
 
     def process_predicted_frame(self, prediction, video_frame):
-        # Project logic comes here
-        pass
+        # Project-specific endpoint: keep custom logic here.
+        return prediction
 
 
 
@@ -62,17 +133,17 @@ class DetectionApp:
             prediction = self.track_objects(prediction, video_frame)
 
         if len(prediction) > 0:
-            car_mask = prediction.class_id == 3
+            car_mask = prediction.class_id == 1
             prediction = prediction[car_mask]
 
-        self.process_predicted_frame(prediction=prediction, video_frame=video_frame)
+        prediction = self.process_predicted_frame(
+            prediction=prediction,
+            video_frame=video_frame
+        )
 
         if self.show or self.save:
-            self.annotate_image(prediction, video_frame)
-            if self.show:
-                self.visualization()
-            if self.save:
-                self.save_video()
+            rendered_frame = self.renderer.render(prediction, video_frame)
+            self.handle_outputs(rendered_frame)
 
     def infer(self, video_frames: List[VideoFrame]) -> List[Any]:
         predictions = self.model.predict(
@@ -85,57 +156,14 @@ class DetectionApp:
         tracked_detections = self.tracker.update_with_detections(prediction)
         return tracked_detections
 
-    def annotate_image(self, prediction, video_frame):
-        if self.track and prediction.tracker_id is not None:
-            labels = [
-                f"Car {conf:.2f} ID:{int(track_id)}"
-                for track_id, conf in zip(
-                    prediction.tracker_id,
-                    prediction.confidence
-                )
-            ]
-        else:
-            labels = [
-                f"Car {conf:.2f}"
-                for conf in prediction.confidence
-            ]
-
-        annotated_image = video_frame.image.copy()
-
-        annotated_image = self.box_annotator.annotate(
-            scene=annotated_image,
-            detections=prediction
-        )
-
-        annotated_image = self.label_annotator.annotate(
-            annotated_image,
-            detections=prediction,
-            labels=labels
-        )
-
-        self.last_frame = annotated_image
-
-    def save_video(self):
-        if self.last_frame is not None:
-            self.sink.write_frame(self.last_frame)
-
-    def visualization(self):
-        cv2.imshow("Predictions", self.last_frame)
-
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord("q"):
-            self.pipeline.terminate()
-            exit()
-
-        elif key == ord(" "):
-            self.paused = not self.paused
-            print("Paused" if self.paused else "Resumed")
+    def handle_outputs(self, frame):
+        self.last_frame = frame
+        self.output_manager.emit(frame, self.pipeline)
 
     def run(self):
         if self.save:
             with sv.VideoSink(self.output_path, self.video_info) as sink:
-                self.sink = sink
+                self.output_manager.set_sink(sink)
                 self.pipeline.start()
                 self.pipeline.join()
         else:
